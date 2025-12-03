@@ -1,0 +1,11 @@
+--check user connections
+SELECT DB_NAME(dbid) AS DatabaseName, COUNT(*) AS Connections
+FROM sys.sysprocesses
+WHERE dbid > 0
+GROUP BY dbid;
+
+
+--if needed 
+ALTER DATABASE [YourDBName] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+-- Do patching
+ALTER DATABASE [YourDBName] SET MULTI_USER;

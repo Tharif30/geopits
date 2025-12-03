@@ -1,0 +1,13 @@
+Login and user creation
+User->
+Security -> login -> New Login -> login name ->Sql server authentication -> password -> server roles
+geolaptop -> properties -> security -> sql server and windows authentication -> both failed and successful logins
+
+termius
+putty
+mobaxterm
+wsl
+
+
+smtp.gmail.com 
+port number 587

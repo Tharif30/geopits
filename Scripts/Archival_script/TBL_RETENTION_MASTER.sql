@@ -1,0 +1,35 @@
+USE [DBADB]
+GO
+
+
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+CREATE TABLE [dbo].[TBL_RETENTION_MASTER](
+	[SourceTablename] [varchar](50) NULL,
+	[DestinationTableName] [varchar](200) NULL,
+	[Filter] [varchar](200) NULL,
+	[Frequency] [varchar](50) NULL,
+	[LastBackUpTaken] [datetime] NULL,
+	[NextPartitionDate] [datetime] NULL,
+	[Rows] [int] NULL,
+	[Status] [bit] NULL,
+	[LastUpdated] [datetime] NULL,
+	[IID_NEW] [int] IDENTITY(1,1) NOT NULL,
+PRIMARY KEY CLUSTERED 
+(
+	[IID_NEW] ASC
+)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, FILLFACTOR = 95, OPTIMIZE_FOR_SEQUENTIAL_KEY = OFF) ON [PRIMARY],
+ CONSTRAINT [pk_retention] UNIQUE NONCLUSTERED 
+(
+	[SourceTablename] ASC,
+	[DestinationTableName] ASC,
+	[Filter] ASC
+)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, FILLFACTOR = 95, OPTIMIZE_FOR_SEQUENTIAL_KEY = OFF) ON [PRIMARY]
+) ON [PRIMARY]
+GO
+
+

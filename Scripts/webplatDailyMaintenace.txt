@@ -1,0 +1,314 @@
+USE [DBADB]
+GO
+
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+
+CREATE PROCEDURE [dbo].[DailyMaintenanceReport]
+    @Recipients NVARCHAR(MAX) = NULL,          -- To
+    @CC NVARCHAR(MAX) = NULL,                              -- CC
+    @BCC NVARCHAR(MAX) = NULL,                             -- BCC
+    @ProfileName NVARCHAR(200) = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+DECLARE @subject NVARCHAR(200);
+
+-- Format date as dd/MM/yy
+SET @subject = CAST(SERVERPROPERTY('ServerName') AS NVARCHAR(128)) 
+               + ' SQL Server Maintenance Report - ' 
+               + CONVERT(VARCHAR(8), GETDATE(), 3);
+
+DECLARE @body NVARCHAR(MAX) = 
+N'<html>
+<head>
+<style>
+    body { font-family: Arial, sans-serif; font-size: 12px; color: black; }
+    h2 { color: black; font-weight: bold; margin-top:20px; }
+    table { border-collapse: collapse; width: 100%; margin-bottom: 20px; }
+    th { background-color: #007BFF; color: white; padding: 6px; border: 1px solid #ccc; text-align: left; }
+    td { padding: 6px; border: 1px solid #ccc; color: black; }
+</style>
+</head>
+<body>';
+
+--- Table 1 Header
+SET @body = @body + '<h2>MAINTENANCE ACTIVITY DETAILS</h2>
+<table border="1" cellspacing="0" cellpadding="4" style="border-collapse:collapse;">
+<tr style="background-color:#f2f2f2;">
+    <th>Job Type</th><th>DatabaseName</th><th>ReportDate</th>
+    <th>Remarks</th><th>JobStatus</th>
+</tr>';
+
+DECLARE @Databases TABLE (DbName SYSNAME);
+INSERT INTO @Databases (DbName)
+VALUES (N'NIMBELPAYAIDB'), (N'NIMBELPAYAIDBLOG');
+
+DECLARE @Jobs TABLE (Job_Type NVARCHAR(50), Job_Name SYSNAME, SortOrder INT);
+INSERT INTO @Jobs (Job_Type, Job_Name, SortOrder)
+VALUES 
+ (N'Full_Backup',   N'DBA_Full Backup', 1),
+ (N'Diff_Backup',   N'DBA_Diff_Backup', 2),
+ (N'T-Log_Backup',  N'DBA_TLog_Backup', 3),
+ (N'Index_Rebuild', N'DBA_Index_Rebuild', 4),
+ (N'Index_Reorg',   N'DBA_Index_ReOrganize', 5),
+ (N'Archival Job',  N'DBA_Live_Log_Archival', 6),
+ (N'Update_Stats',  N'DBA_Index_Rebuild', 7); -- piggyback schedule from Rebuild
+
+-- Helper: convert freq_interval bitmask into weekday names
+CREATE TABLE #WeekDays (BitValue INT, DayName VARCHAR(10));
+INSERT INTO #WeekDays VALUES
+(1,'Sun'),(2,'Mon'),(4,'Tue'),(8,'Wed'),
+(16,'Thu'),(32,'Fri'),(64,'Sat');
+
+;WITH job_rollup AS
+(
+    SELECT 
+        j.Job_Type,
+        j.Job_Name,
+        sj.job_id,
+        MAX(CASE WHEN jh.step_id = 0 
+                 THEN msdb.dbo.agent_datetime(jh.run_date, jh.run_time)
+                 ELSE NULL END) AS last_completion_time,
+        MAX(jh.run_status) AS last_status,
+        sched_txt = 
+            CASE s.freq_type
+                WHEN 1 THEN 'One-time at ' 
+                        + STUFF(STUFF(RIGHT('000000' + CAST(s.active_start_time AS VARCHAR(6)),6),3,0,':'),6,0,':00')
+                WHEN 4 THEN 
+                        CASE s.freq_subday_type
+                            WHEN 4 THEN 'Daily every ' + CAST(s.freq_subday_interval AS VARCHAR) + ' minute(s)'
+                            WHEN 8 THEN 'Daily every ' + CAST(s.freq_subday_interval AS VARCHAR) + ' hour(s)'
+                            ELSE 'Daily at ' 
+                                + STUFF(STUFF(RIGHT('000000' + CAST(s.active_start_time AS VARCHAR(6)),6),3,0,':'),6,0,':00')
+                        END
+                WHEN 8 THEN 'Weekly on ' + 
+                        STUFF((SELECT ','+w.DayName
+                               FROM #WeekDays w
+                               WHERE w.BitValue & s.freq_interval <> 0
+                               FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'),1,1,'') 
+                        + ' at ' + STUFF(STUFF(RIGHT('000000' + CAST(s.active_start_time AS VARCHAR(6)),6),3,0,':'),6,0,':00')
+                ELSE 'Other schedule'
+            END
+    FROM @Jobs j
+    LEFT JOIN msdb.dbo.sysjobs sj
+        ON sj.name = j.Job_Name
+    LEFT JOIN msdb.dbo.sysjobhistory jh
+        ON sj.job_id = jh.job_id
+    LEFT JOIN msdb.dbo.sysjobschedules js
+        ON sj.job_id = js.job_id
+    LEFT JOIN msdb.dbo.sysschedules s
+        ON js.schedule_id = s.schedule_id
+    GROUP BY j.Job_Type, j.Job_Name, sj.job_id, s.freq_type, s.freq_interval, s.freq_subday_type, s.freq_subday_interval, s.active_start_time
+)
+SELECT @body = @body + 
+    '<tr><td>' + j.Job_Type + '</td><td>' + d.DbName + '</td><td>' + CONVERT(VARCHAR(10), GETDATE(), 120) + 
+    '</td><td>' + 
+        CASE 
+            WHEN j.Job_Type IN ('Full_Backup','Diff_Backup') AND r.job_id IS NULL 
+                 THEN 'We recommend to configure the ' + 
+                      CASE WHEN j.Job_Type='Diff_Backup' THEN 'Differential Backup'
+                           WHEN j.Job_Type='Full_Backup' THEN 'Full Backup'
+                           ELSE j.Job_Type END
+            WHEN j.Job_Type = 'Update_Stats' 
+                 THEN 'Configured: Same schedule as Index Rebuild/Index Reorg'
+            WHEN r.job_id IS NOT NULL 
+                 THEN 'Configured: ' + ISNULL(r.sched_txt,'No schedule found')
+            ELSE 'We recommend to configure the ' + j.Job_Type
+        END + 
+    '</td><td>' +
+        CASE 
+            WHEN j.Job_Type IN ('Full_Backup','Diff_Backup') AND r.job_id IS NULL THEN 'Not Configured'
+            WHEN j.Job_Type = 'Update_Stats' THEN 
+                CASE 
+                    WHEN EXISTS (SELECT 1 FROM job_rollup rr WHERE rr.Job_Type='Index_Rebuild' AND rr.last_status=1)
+                     or EXISTS (SELECT 1 FROM job_rollup rr WHERE rr.Job_Type='Index_Reorg' AND rr.last_status=1)
+                    THEN 'Succeeded'
+                    ELSE 'Failed'
+                END
+            WHEN r.job_id IS NULL THEN 'Not Configured'
+            WHEN r.last_completion_time IS NULL AND j.Job_Type IN ('Index_Rebuild') THEN 'NOT AVAILABLE'
+            ELSE 
+                CASE r.last_status 
+                     WHEN 1 THEN 'Succeeded'
+                     WHEN 0 THEN 'Failed'
+                     ELSE 'NOT AVAILABLE' 
+                END
+        END + 
+    '</td></tr>'
+FROM @Databases d
+CROSS JOIN @Jobs j
+LEFT JOIN job_rollup r
+    ON j.Job_Type = r.Job_Type;
+
+SET @body = @body + '</table>';
+
+DROP TABLE #WeekDays;
+
+
+SET @body = @body + '<h2>INDEX REBUILT/REORGANIZE TODAY</h2>
+<table>
+<tr>
+    <th>DatabaseName</th><th>SchemaName</th><th>ObjectName</th>
+    <th>IndexName</th><th>StartTime</th><th>EndTime</th>
+</tr>';
+
+SELECT @body = @body + 
+    '<tr><td>' + DatabaseName + '</td><td>' + SchemaName + '</td><td>' + ObjectName +
+    '</td><td>' + IndexName + '</td><td>' + CONVERT(VARCHAR, StartTime, 120) +
+    '</td><td>' + CONVERT(VARCHAR, EndTime, 120) + '</td></tr>'
+FROM (
+    SELECT TOP (1000)
+          [DatabaseName],[SchemaName],[ObjectName],[IndexName],
+          CAST([StartTime] AS DATETIME) AS StartTime,
+          CAST([EndTime] AS DATETIME)   AS EndTime
+    FROM [DBADB].[dbo].[CommandLog]
+    WHERE starttime >= CAST(GETDATE() AS date) 
+      AND CommandType='Alter_index' 
+      AND errorNumber=0
+) q;
+
+SET @body = @body + '</table>';
+
+-- ================================================
+-- Missing Indexes Section for DailyMaintenanceReport
+-- ================================================
+DECLARE @sql NVARCHAR(MAX);
+DECLARE @MissingIndexHtml NVARCHAR(MAX);
+
+SET @sql = N'
+SELECT 
+    DB_NAME(mid.database_id) AS DatabaseName,
+    OBJECT_NAME(mid.object_id, mid.database_id) AS TableName,
+    migs.user_seeks,
+    migs.last_user_seek,
+    migs.avg_user_impact AS ImpactValue,
+    CAST(migs.avg_user_impact AS VARCHAR(10)) + ''%'' AS EstimatedImprovementPercent,
+    ''CREATE NONCLUSTERED INDEX [IX_'' 
+        + LEFT(OBJECT_NAME(mid.object_id, mid.database_id), 50)  -- truncate to keep name <128
+        + ''_'' 
+        + LEFT(REPLACE(ISNULL(mid.equality_columns, ''''), '', '', ''_''), 50)
+        + CASE WHEN mid.inequality_columns IS NOT NULL 
+               THEN ''_'' + LEFT(REPLACE(mid.inequality_columns, '', '', ''_''), 30) 
+               ELSE '''' END
+        + ''] ON ['' + DB_NAME(mid.database_id) + ''].['' 
+        + SCHEMA_NAME(o.schema_id) + ''].['' 
+        + OBJECT_NAME(mid.object_id, mid.database_id) + ''] ('' 
+        + ISNULL(mid.equality_columns, '''') 
+        + CASE WHEN mid.inequality_columns IS NOT NULL 
+               THEN CASE WHEN mid.equality_columns IS NOT NULL THEN '','' ELSE '''' END + mid.inequality_columns 
+               ELSE '''' END
+        + '') '' 
+        + CASE WHEN mid.included_columns IS NOT NULL 
+               THEN ''INCLUDE ('' + mid.included_columns + '')'' 
+               ELSE '''' END
+    AS CreateIndexStatement
+FROM sys.dm_db_missing_index_group_stats AS migs
+JOIN sys.dm_db_missing_index_groups AS mig
+    ON migs.group_handle = mig.index_group_handle
+JOIN sys.dm_db_missing_index_details AS mid
+    ON mig.index_handle = mid.index_handle
+JOIN sys.objects o
+    ON mid.object_id = o.object_id
+WHERE migs.user_seeks > 100
+AND mid.database_id = DB_ID(''nimbelpayapidb'')
+ORDER BY migs.avg_user_impact DESC;';
+
+-- Temp table
+IF OBJECT_ID('tempdb..#MissingIndexes') IS NOT NULL
+    DROP TABLE #MissingIndexes;
+
+CREATE TABLE #MissingIndexes
+(
+    DatabaseName SYSNAME,
+    TableName SYSNAME,
+    UserSeeks BIGINT,
+    LastUserSeek DATETIME,
+    ImpactValue FLOAT,
+    EstimatedImprovementPercent VARCHAR(20),
+    CreateIndexStatement NVARCHAR(MAX)
+);
+
+-- Execute inside nimbelpayapidb
+INSERT INTO #MissingIndexes
+EXEC ('USE nimbelpayapidb; ' + @sql);
+
+-- ================================================
+-- Build Missing Indexes HTML
+-- ================================================
+SET @MissingIndexHtml = 
+    '<h2>MISSING INDEXES </h2>
+    <table border="1" cellspacing="0" cellpadding="4">
+        <tr>
+            <th>Database</th>
+            <th>Table</th>
+            <th>User Seeks</th>
+            <th>Last User Seek</th>
+            <th>Impact Value</th>
+            <th>Improvement %</th>
+            <th>Index Script</th>
+        </tr>';
+
+SELECT @MissingIndexHtml = @MissingIndexHtml + 
+    '<tr>
+        <td>' + ISNULL(DatabaseName,'') + '</td>
+        <td>' + ISNULL(TableName,'') + '</td>
+        <td>' + CAST(UserSeeks AS VARCHAR(20)) + '</td>
+        <td>' + ISNULL(CONVERT(VARCHAR(20), LastUserSeek, 120),'') + '</td>
+        <td>' + CAST(ImpactValue AS VARCHAR(20)) + '</td>
+        <td>' + ISNULL(EstimatedImprovementPercent,'') + '</td>
+        <td>' + ISNULL(CreateIndexStatement,'') + '</td>
+    </tr>'
+FROM #MissingIndexes;
+
+SET @MissingIndexHtml = @MissingIndexHtml + '</table>';
+
+-- Append to email body
+SET @body = @body + @MissingIndexHtml;
+
+-- Cleanup
+DROP TABLE #MissingIndexes;
+
+
+SET @body = @body + '<h2>UNUSED INDEX</h2>
+<table>
+<tr>
+    <th>DatabaseName</th><th>ObjectName</th><th>IndexName</th>
+    <th>UserSeek</th><th>UserScans</th><th>UserLookups</th>
+    <th>UserUpdates</th><th>TableRows</th>
+</tr>';
+
+SELECT @body = @body + 
+    '<tr><td>' + DatabaseName + '</td><td>' + ObjectName + '</td><td>' + IndexName +
+    '</td><td>' + CAST(UserSeek AS VARCHAR) + '</td><td>' + CAST(UserScans AS VARCHAR) +
+    '</td><td>' + CAST(UserLookups AS VARCHAR) + '</td><td>' + CAST(UserUpdates AS VARCHAR) +
+    '</td><td>' + CAST(TableRows AS VARCHAR) + '</td></tr>'
+FROM (
+    SELECT TOP (1000) [DatabaseName],[ObjectName],[IndexName],
+           [UserSeek],[UserScans],[UserLookups],[UserUpdates],[TableRows]
+    FROM [DBADB].[dbo].[UnusedIndexes]
+    WHERE LOGDATE >= CAST(GETDATE() AS date)
+) q;
+
+SET @body = @body + '</table></body></html>';
+
+EXEC msdb.dbo.sp_send_dbmail
+    @profile_name = @ProfileName,
+    @recipients   = @Recipients,
+	@blind_copy_recipients=@BCC,
+	@copy_recipients=@CC,
+    @subject      = @subject,
+    @body         = @body,
+    @body_format  = 'HTML';
+                          
+    
+END 
+GO
+
+

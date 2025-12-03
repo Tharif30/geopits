@@ -1,0 +1,49 @@
+for renaming the Database
+MYSQL: 
+MSSQL: Exec sp_renamedb new old
+MSSQL: Alter database database_name modify Name=new_database_name;
+
+
+for table:
+
+rename the table:
+Mysql: Rename table old to new
+MSSQL: Exec sp_rename old,new
+
+renaming the column
+MySQL: Alter table table_name rename old to new ;
+MSSQL: Exec sp_rename old_name,new_name,column ;
+
+adding a column:
+MYSQL: alter table table_name add column_name datatype constraint
+MySQL: alter table table_name add column_name datatype constraint After column_name
+
+MSSQL: alter table table_name add column_name datatype constraint;
+
+Modify a column:
+MYSQL: alter table table_name modify column column_name new_datatype;
+
+MSSQL: alter table table_name alter column column_name datatype constraint 
+
+Drop a column:
+MYSQL: alter table table_name drop column column_name
+MSSQL: alter table table_name drop column column_name
+
+adding a constraint
+MYSQL: Alter table table_name Add constraint constraint_name constraint(column)
+MSSQL: Alter table table_name add constraint conatraint_name constraint(column)
+
+drop a constraint
+MYSQL:Alter table table_name drop constraint contraint_name
+
+Update :
+MYSQL: Update table_name set column=value where condition;
+MSSQL: Update table_name set column=value where condition;
+
+truncate:
+MYSQL: Truncate table table_name
+MSSQL: truncate table table_name
+
+drop :
+MYSQL:drop database database_name
+MSSQL:drop database database_name

@@ -1,0 +1,26 @@
+-- Check disk space, free %, and server name
+EXEC master.dbo.xp_fixeddrives;
+
+-- More detailed version:
+WITH DiskInfo AS (
+    SELECT 
+        vs.volume_mount_point AS DriveLetter,
+        vs.total_bytes / 1024 / 1024 / 1024.0 AS TotalGB,
+        vs.available_bytes / 1024 / 1024 / 1024.0 AS FreeGB,
+        CAST(ROUND(
+            (1 - (CAST(vs.available_bytes AS FLOAT) / CAST(vs.total_bytes AS FLOAT))) * 100, 2
+        ) AS DECIMAL(5,2)) AS UsedPercent
+    FROM sys.master_files mf
+    CROSS APPLY sys.dm_os_volume_stats(mf.database_id, mf.file_id) vs
+    GROUP BY vs.volume_mount_point, vs.total_bytes, vs.available_bytes
+)
+SELECT 
+    SERVERPROPERTY('MachineName') AS ServerName,
+    DriveLetter
+    TotalGB,
+    FreeGB,
+    (TotalGB - FreeGB) AS UsedGB,
+    UsedPercent
+FROM DiskInfo
+where DriveLetter like'%K:\%'
+ORDER BY DriveLetter;

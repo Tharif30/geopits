@@ -1,0 +1,21 @@
+-- Check currently running backup status
+SELECT
+    r.session_id,
+    s.login_name,
+    s.host_name,
+    s.program_name,
+    r.command,                          -- should show 'BACKUP DATABASE' or 'BACKUP LOG'
+    r.percent_complete,                 -- percent done
+    CAST(r.percent_complete AS DECIMAL(5,2)) AS Percent_Complete,
+    DATEADD(SECOND, r.estimated_completion_time/1000, GETDATE()) AS EstimatedCompletionTime,
+    r.start_time,
+    DATEDIFF(MINUTE, r.start_time, GETDATE()) AS Elapsed_Minutes,
+    CAST(r.estimated_completion_time/1000/60 AS DECIMAL(10,2)) AS Est_Remaining_Minutes,
+    (r.total_elapsed_time/1000/60) AS TotalElapsed_Minutes,
+    (r.estimated_completion_time/1000/60) + (r.total_elapsed_time/1000/60) AS Est_Total_Minutes,
+    r.database_id,
+    DB_NAME(r.database_id) AS DatabaseName
+FROM sys.dm_exec_requests r
+JOIN sys.dm_exec_sessions s 
+    ON r.session_id = s.session_id
+WHERE r.command LIKE 'BACKUP%';

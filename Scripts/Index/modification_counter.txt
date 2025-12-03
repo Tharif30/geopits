@@ -1,0 +1,13 @@
+
+--modification counter >500,then need to updata statistics on the particular index
+SELECT  
+    s.name AS StatsName,
+    sp.last_updated,
+    sp.modification_counter
+FROM sys.stats AS s
+OUTER APPLY sys.dm_db_stats_properties(s.object_id, s.stats_id) AS sp
+WHERE s.object_id = OBJECT_ID('dbo.transaction_transactiondata')
+AND s.name IN ('IX_Transaction_TransactionData_Status_ClientRef', 'IX_Transaction_TransactionData_UserId_ClientRef');
+
+UPDATE STATISTICS dbo.transaction_transactiondata IX_Transaction_TransactionData_Status_ClientRef;
+

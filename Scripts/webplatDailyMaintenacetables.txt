@@ -1,0 +1,168 @@
+
+
+add line here in BOLD BLACK TEXT "MAINTENANE ACTIVITY DETAIS"
+--TAble 1
+DECLARE @Databases TABLE (DbName SYSNAME);
+INSERT INTO @Databases (DbName)
+VALUES (N'NIMBELPAYAIDB'), (N'NIMBELPAYAIDBLOG');
+
+DECLARE @Jobs TABLE (Job_Type NVARCHAR(50), Job_Name SYSNAME, SortOrder INT);
+INSERT INTO @Jobs (Job_Type, Job_Name, SortOrder)
+VALUES 
+ (N'Full_Backup',   N'DBA_Full Backup', 1),
+ (N'Diff_Backup',   N'DBA_Diff_Backup', 2),
+ (N'T-Log_Backup',  N'DBA_TLog_Backup', 3),
+ (N'Index_Rebuild', N'DBA_Index_Rebuild', 4),
+ (N'Index_Reorg',   N'DBA_Index_ReOrganize', 5),
+ (N'Archival Job',  N'DBA_Live_Log_Archival', 6);
+
+-- Helper: convert freq_interval bitmask into weekday names
+CREATE TABLE #WeekDays (BitValue INT, DayName VARCHAR(10));
+INSERT INTO #WeekDays VALUES
+(1,'Sun'),(2,'Mon'),(4,'Tue'),(8,'Wed'),
+(16,'Thu'),(32,'Fri'),(64,'Sat');
+
+;WITH job_rollup AS
+(
+    SELECT 
+        j.Job_Type,
+        j.Job_Name,
+        sj.job_id,
+        MAX(CASE WHEN jh.step_id = 0 
+                 THEN msdb.dbo.agent_datetime(jh.run_date, jh.run_time)
+                 ELSE NULL END) AS last_completion_time,
+        MAX(jh.run_status) AS last_status,
+        sched_txt = 
+            CASE s.freq_type
+                WHEN 1 THEN 'One-time at ' 
+                        + STUFF(STUFF(RIGHT('000000' + CAST(s.active_start_time AS VARCHAR(6)),6),3,0,':'),6,0,':00')
+                WHEN 4 THEN 
+                        CASE s.freq_subday_type
+                            WHEN 4 THEN 'Daily every ' + CAST(s.freq_subday_interval AS VARCHAR) + ' minute(s)'
+                            WHEN 8 THEN 'Daily every ' + CAST(s.freq_subday_interval AS VARCHAR) + ' hour(s)'
+                            ELSE 'Daily at ' 
+                                + STUFF(STUFF(RIGHT('000000' + CAST(s.active_start_time AS VARCHAR(6)),6),3,0,':'),6,0,':00')
+                        END
+                WHEN 8 THEN 'Weekly on ' + 
+                        STUFF((
+                            SELECT ','+w.DayName
+                            FROM #WeekDays w
+                            WHERE w.BitValue & s.freq_interval <> 0
+                            FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'),1,1,'') 
+                        + ' at ' + STUFF(STUFF(RIGHT('000000' + CAST(s.active_start_time AS VARCHAR(6)),6),3,0,':'),6,0,':00')
+                ELSE 'Other schedule'
+            END
+    FROM @Jobs j
+    LEFT JOIN msdb.dbo.sysjobs sj
+        ON sj.name = j.Job_Name
+    LEFT JOIN msdb.dbo.sysjobhistory jh
+        ON sj.job_id = jh.job_id
+    LEFT JOIN msdb.dbo.sysjobschedules js
+        ON sj.job_id = js.job_id
+    LEFT JOIN msdb.dbo.sysschedules s
+        ON js.schedule_id = s.schedule_id
+    GROUP BY j.Job_Type, j.Job_Name, sj.job_id, s.freq_type, s.freq_interval, s.freq_subday_type, s.freq_subday_interval, s.active_start_time
+)
+SELECT 
+    j.Job_Type,
+    d.DbName AS [DatabaseName],
+    CAST(GETDATE() AS DATE) AS [ReportDate],
+    Remarks =
+        CASE 
+            WHEN j.Job_Type IN ('Full_Backup','Diff_Backup') 
+                 AND r.job_id IS NULL 
+                 THEN 'We recommend to configure the ' 
+                      + CASE WHEN j.Job_Type='Diff_Backup' THEN 'Differential Backup'
+                             WHEN j.Job_Type='Full_Backup' THEN 'Full Backup'
+                             ELSE j.Job_Type END
+            WHEN r.job_id IS NOT NULL 
+                 THEN 'Configured: ' + ISNULL(r.sched_txt,'No schedule found')
+            ELSE 'We recommend to configure the ' + j.Job_Type
+        END,
+    JobStatus =
+        CASE 
+            WHEN j.Job_Type IN ('Full_Backup','Diff_Backup') 
+                 AND r.job_id IS NULL THEN 'Not Configured'
+            WHEN r.job_id IS NULL THEN 'Not Configured'
+            WHEN r.last_completion_time IS NULL 
+                 AND j.Job_Type IN ('Index_Rebuild') THEN 'NOT AVAILABLE'
+            ELSE 
+                CASE r.last_status 
+                     WHEN 1 THEN 'Succeeded'
+                     WHEN 0 THEN 'Failed'
+                     ELSE 'NOT AVAILABLE' 
+                END
+        END
+FROM @Databases d
+CROSS JOIN @Jobs j
+LEFT JOIN job_rollup r
+    ON j.Job_Type = r.Job_Type
+ORDER BY j.SortOrder, j.Job_Type, d.DbName;
+
+DROP TABLE #WeekDays;
+
+add line here in BOLD BLACK TEXT "INDEX REBUILT/REORGANIZE TODAY"
+--Table 2
+SELECT TOP (1000)
+      [DatabaseName]
+      ,[SchemaName]
+      ,[ObjectName]    
+      ,[IndexName]
+    ,CAST([StartTime] AS DATETIME) AS StartTime 
+    ,CAST([EndTime]   AS DATETIME) AS EndTime  
+  FROM [DBADB].[dbo].[CommandLog]
+   WHERE starttime >= CAST(GETDATE() AS date) and CommandType='Alter_index' and errorNumber=0;
+
+
+add line here in BOLD BLACK TEXT "MISSING INDEX"
+--table 3 missing index
+use nimbelpayapidb
+
+SELECT 
+    DB_NAME(mid.database_id) AS DatabaseName,
+    OBJECT_NAME(mid.object_id, mid.database_id) AS TableName,
+    migs.user_seeks AS UserSeeks,
+    migs.last_user_seek AS LastUserSeek,
+    CAST(migs.avg_user_impact AS VARCHAR(5)) + '%' AS EstimatedImprovementPercent,  -- percentage benefit
+    'CREATE NONCLUSTERED INDEX [IX_' 
+        + OBJECT_NAME(mid.object_id, mid.database_id) 
+        + '_' 
+        + REPLACE(REPLACE(ISNULL(mid.equality_columns,''),', ','_'),'[','')
+        + CASE WHEN mid.inequality_columns IS NOT NULL 
+               THEN '_' + REPLACE(REPLACE(mid.inequality_columns,', ','_'),'[','') 
+               ELSE '' END
+        + '] ON [' + DB_NAME(mid.database_id) + '].[' 
+        + SCHEMA_NAME(o.schema_id) + '].[' 
+        + OBJECT_NAME(mid.object_id, mid.database_id) + '] (' 
+        + ISNULL(mid.equality_columns,'') 
+        + CASE WHEN mid.inequality_columns IS NOT NULL 
+               THEN CASE WHEN mid.equality_columns IS NOT NULL THEN ',' ELSE '' END + mid.inequality_columns 
+               ELSE '' END
+        + ') ' 
+        + CASE WHEN mid.included_columns IS NOT NULL 
+               THEN 'INCLUDE (' + mid.included_columns + ')' 
+               ELSE '' END
+    AS CreateIndexStatement
+FROM sys.dm_db_missing_index_group_stats AS migs
+JOIN sys.dm_db_missing_index_groups AS mig
+    ON migs.group_handle = mig.index_group_handle
+JOIN sys.dm_db_missing_index_details AS mid
+    ON mig.index_handle = mid.index_handle
+JOIN sys.objects o
+    ON mid.object_id = o.object_id
+WHERE mid.database_id = DB_ID()
+  AND migs.user_seeks > 100
+ORDER BY migs.avg_user_impact desc, UserSeeks DESC;
+
+add line here in BOLD BLACK TEXT "UNUSED INDEX"
+--Table 4
+SELECT TOP (1000) [DatabaseName]
+      ,[ObjectName]
+      ,[IndexName]
+      ,[UserSeek]
+      ,[UserScans]
+      ,[UserLookups]
+      ,[UserUpdates]
+      ,[TableRows]
+  FROM [DBADB].[dbo].[UnusedIndexes]
+  WHERE LOGDATE >= CAST(GETDATE() AS date)

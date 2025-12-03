@@ -1,0 +1,6 @@
+
+->check for how many index suggestion on a table
+use this file -> missing index Group by TableName and each Key Column
+
+-check missing index 
+file->missing index with column

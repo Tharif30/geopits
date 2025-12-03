@@ -1,0 +1,6 @@
+SELECT @@VERSION;
+
+
+SELECT SERVERPROPERTY('ProductVersion') AS Version,
+       SERVERPROPERTY('ProductLevel') AS Level,
+       SERVERPROPERTY('Edition') AS Edition;

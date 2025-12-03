@@ -1,0 +1,16 @@
+
+-- View current size and free space in the transaction log
+DBCC SQLPERF(LOGSPACE);
+
+-- Returns available space for each drive (SQL Server 2012+)
+EXEC xp_fixeddrives;
+
+-- Get logical file names and types
+USE temp_database;
+GO
+SELECT name AS LogicalName, type_desc, size * 8 / 1024 AS SizeMB
+FROM sys.database_files
+WHERE type_desc = 'LOG';
+
+-- Shrink log file to target size (e.g., 500 MB)
+DBCC SHRINKFILE (temp_db_Log, 1);

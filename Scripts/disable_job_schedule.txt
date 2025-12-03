@@ -1,0 +1,24 @@
+
+
+USE msdb;
+GO
+
+-- List the jobs you want to exclude from disabling (keep them active)
+DECLARE @ExcludedJobs TABLE (JobName SYSNAME);
+INSERT INTO @ExcludedJobs (JobName)
+VALUES 
+    ('LSBackup_DBAUDIT'),
+('LSBackup_ERPINTDB'),
+	('LSBackup_ERPMIGDB'),
+	('LSBackup_TTLSPROD'),
+('J_DB_Txns_Backups.Subplan_1'),
+    ('J_dbaudits'),
+('dba_dr_restart_endpoint'); 
+-- Disable all job schedules except those in the exclusion list
+UPDATE s
+SET s.enabled = 0
+FROM msdb.dbo.sysschedules s
+JOIN msdb.dbo.sysjobschedules js ON s.schedule_id = js.schedule_id
+JOIN msdb.dbo.sysjobs j ON js.job_id = j.job_id
+LEFT JOIN @ExcludedJobs ej ON j.name = ej.JobName
+WHERE ej.JobName IS NULL;
