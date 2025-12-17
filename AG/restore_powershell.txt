@@ -1,0 +1,20 @@
+$filelist = Get-ChildItem "E:\backups\t" | where-object {$_.Extension -eq '.trn'} | Sort-Object -Property LastWriteTime | Select Name 
+ 
+$i = 1
+
+foreach ($file in $filelist)
+ 
+{
+ 
+$restorefile = $file.Name
+ 
+ 
+ 
+$text = "RESTORE LOG [HPGASDB] FROM DISK = 'E:\backups\$restorefile' WITH file=1,stats=50,NORECOVERY;"
+ 
+Write-Output $text
+Write-Output "print('completed $i')"
+
+$i++
+ 
+}
