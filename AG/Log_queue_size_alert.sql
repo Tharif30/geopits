@@ -45,7 +45,7 @@ IF EXISTS (
     SELECT 1 FROM @AlertTable WHERE EstimatedLatencyMinutes > @ThresholdMinutes
 )
 BEGIN
-    SET @Subject = 'ALERT: Grouped Log Send Latency Detected by Replica'
+    SET @Subject = 'DR Sequence is more than 1 HOUR'
 
     SET @HTMLBody = 
     N'<html><body>' +
