@@ -1,0 +1,48 @@
+-- Find the certificate protecting the database encryption key
+SELECT 
+    db.name              AS database_name,
+    dek.encryptor_type   AS encryptor_type,
+    cert.name            AS certificate_name,
+    cert.certificate_id  AS certificate_id,
+    cert.start_date      AS cert_start_date,
+    cert.expiry_date     AS cert_expiry_date
+FROM sys.dm_database_encryption_keys dek
+JOIN sys.databases db   ON db.database_id  = dek.database_id
+JOIN sys.certificates cert ON cert.thumbprint = dek.encryptor_thumbprint
+WHERE db.name = 'YourDatabaseName';
+
+
+-- Query 2: List All Certificates in master DB
+USE master;
+
+SELECT 
+    name            AS certificate_name,
+    certificate_id,
+    pvt_key_encryption_type_desc,
+    start_date,
+    expiry_date,
+    subject
+FROM sys.certificates
+ORDER BY name;
+
+Query 3: Check TDE Status + Certificate Together
+
+USE master;
+
+SELECT 
+    d.name                        AS database_name,
+    dek.encryption_state,
+    CASE dek.encryption_state
+        WHEN 0 THEN 'No encryption'
+        WHEN 1 THEN 'Unencrypted'
+        WHEN 2 THEN 'Encryption in progress'
+        WHEN 3 THEN 'Encrypted'
+        WHEN 4 THEN 'Key change in progress'
+        WHEN 5 THEN 'Decryption in progress'
+    END                           AS encryption_status,
+    c.name                        AS certificate_name,
+    dek.encryptor_thumbprint,
+    dek.percent_complete
+FROM sys.dm_database_encryption_keys dek
+JOIN sys.databases d    ON d.database_id    = dek.database_id
+JOIN sys.certificates c ON c.thumbprint     = dek.encryptor_thumbprint;
