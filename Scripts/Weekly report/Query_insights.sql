@@ -37,7 +37,7 @@ WHERE DB_NAME(st.dbid) NOT IN
 )
 ORDER BY qs.total_logical_reads DESC;
 
-
+--Query Insights logical_reads
 --query_insights_by_cpu_time
 SELECT TOP 5
     DB_NAME(st.dbid) AS [Database Name],

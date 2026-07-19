@@ -71,3 +71,16 @@ LEFT JOIN ExistingIndexes e
     AND e.IncludedColumns = m.IncludedColumns
 WHERE e.IndexName IS NULL
 ORDER BY m.UserSeeks DESC, m.EstimatedImprovementPercent DESC;
+
+
+
+SELECT
+    i.name,
+    i.type_desc
+FROM sys.indexes i
+WHERE object_id = OBJECT_ID('dbo.tbl_master_telecom_plans');
+
+
+exec sp_helpindex 'dbo.tbl_user_subscriptions_i2'
+
+exec sp_spaceused 'dbo.tbl_user_subscriptions_i2'

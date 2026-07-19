@@ -69,3 +69,15 @@ WHERE ius.database_id = DB_ID()
   -- but still maintained
   AND ius.user_updates > 0
 ORDER BY ius.user_updates DESC;
+
+
+
+SELECT
+    i.name,
+    i.type_desc
+FROM sys.indexes i
+WHERE object_id = OBJECT_ID('dbo.tbl_master_telecom_plans');
+
+
+exec sp_helpindex 'dbo.tbl_user_subscriptions_i2'
+exec sp_spaceused 'dbo.tbl_user_subscriptions_i2'

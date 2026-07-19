@@ -1,0 +1,21 @@
+vim
+
+
+Press esc to back
+
+I for entering the words
+press again i for erasing the character
+presee :wq for saving
+
+
+erporting server
+
+SQL> SELECT DATABASE_ROLE, OPEN_MODE
+FROM V$DATABASE;  2
+
+DATABASE_ROLE    OPEN_MODE
+---------------- --------------------
+PHYSICAL STANDBY READ ONLY WITH APPLY
+
+
+SELECT DATABASE_ROLE, OPEN_MODE FROM V$DATABASE;

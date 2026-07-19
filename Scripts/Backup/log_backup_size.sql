@@ -12,7 +12,7 @@ s.backup_finish_date,
 s.type,
 s.recovery_model
 FROM
-msdb.dbo.backupset 5
+msdb.dbo.backupset 
 INNER JOIN
 msdb.dbo.backupmediafamily m ON s.media_set_id = m.media_set_id
 WHERE
@@ -32,9 +32,13 @@ SELECT
     b.backup_finish_date,
     b.backup_size / 1024 / 1024 AS backup_size_MB,
     b.compressed_backup_size / 1024 / 1024 AS compressed_size_MB,
+    mf.physical_device_name AS backup_file_path,
     CASE b.type 
-        WHEN 'L' THEN 'Log Backup' 
-        ELSE b.type END AS backup_type
+        WHEN 'L' THEN 'Log Backup'
+        ELSE b.type
+    END AS backup_type
 FROM msdb.dbo.backupset b
+JOIN msdb.dbo.backupmediafamily mf
+    ON b.media_set_id = mf.media_set_id
 WHERE b.type = 'L'   -- L = Log backup
 ORDER BY b.backup_start_date DESC;

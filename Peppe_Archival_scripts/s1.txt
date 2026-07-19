@@ -1,0 +1,78 @@
+
+ALTER TABLE DBADB.dbo.TBL_RETENTION_MASTER 
+ALTER COLUMN Filter VARCHAR(4000);
+
+ALTER TABLE DBADB.dbo.TBL_RETENTION_MASTER 
+ALTER COLUMN sourcetablename VARCHAR(2000);
+
+-- Compare columns between two tables across databases with summary
+-- Replace DB1, DB2, Table1, Table2
+IF OBJECT_ID('tempdb..#Compare') IS NOT NULL DROP TABLE #Compare;
+;WITH Table1Cols AS (
+    SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, IS_NULLABLE
+    FROM DBLoanguard.INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_NAME = 'DocumentManualTrigger'
+),
+Table2Cols AS (
+    SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, IS_NULLABLE
+    FROM DBLoanguard.INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_NAME = 'BKPDocumentManualTrigger'
+)
+SELECT 
+    ISNULL(t1.COLUMN_NAME, t2.COLUMN_NAME) AS ColumnName,
+    t1.DATA_TYPE AS DB1_DataType,
+    t2.DATA_TYPE AS DB2_DataType,
+    t1.CHARACTER_MAXIMUM_LENGTH AS DB1_Length,
+    t2.CHARACTER_MAXIMUM_LENGTH AS DB2_Length,
+    t1.IS_NULLABLE AS DB1_Nullable,
+    t2.IS_NULLABLE AS DB2_Nullable,
+    CASE 
+        WHEN t1.COLUMN_NAME IS NULL THEN 'Missing in DB1'
+        WHEN t2.COLUMN_NAME IS NULL THEN 'Missing in DB2'
+        WHEN t1.DATA_TYPE <> t2.DATA_TYPE 
+          OR ISNULL(t1.CHARACTER_MAXIMUM_LENGTH, -1) <> ISNULL(t2.CHARACTER_MAXIMUM_LENGTH, -1)
+          OR t1.IS_NULLABLE <> t2.IS_NULLABLE
+            THEN 'Mismatch'
+        ELSE 'Match'
+    END AS ComparisonResult
+INTO #Compare
+FROM Table1Cols t1
+FULL OUTER JOIN Table2Cols t2
+    ON t1.COLUMN_NAME = t2.COLUMN_NAME;
+
+-- Detailed results
+SELECT * FROM #Compare ORDER BY ColumnName;
+
+-- Summary results
+SELECT 
+    ComparisonResult,
+    COUNT(*) AS ColumnCount
+FROM #Compare
+GROUP BY ComparisonResult;
+
+
+
+
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+DECLARE @TableName SYSNAME = 'DocumentManualTrigger';
+DECLARE @SchemaName SYSNAME = 'dbo';
+
+SELECT STRING_AGG(QUOTENAME(c.name), ',') AS ColumnList
+FROM sys.columns c
+JOIN sys.tables t ON c.object_id = t.object_id
+JOIN sys.schemas s ON t.schema_id = s.schema_id
+WHERE t.name = @TableName
+  AND s.name = @SchemaName;
+
+
+  select * from DocumentValidatingMessages where EXISTS (
+    SELECT 1
+    FROM Applications A
+    WHERE A.ApplicationId = DocumentValidatingMessages.ApplicationId
+      AND A.CreatedOn < DATEADD(MONTH, -6, CAST(GETDATE() AS DATE))
+)

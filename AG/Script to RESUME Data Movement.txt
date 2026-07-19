@@ -1,0 +1,18 @@
+--Script to RESUME Data Movement
+
+DECLARE @sql NVARCHAR(MAX) = N'';
+ 
+SELECT @sql += 
+    'ALTER DATABASE [' + d.name + '] SET HADR RESUME;' + CHAR(13)
+FROM sys.databases AS d
+JOIN sys.dm_hadr_database_replica_states AS r
+    ON d.database_id = r.database_id
+JOIN sys.availability_replicas AS ar
+    ON r.replica_id = ar.replica_id
+JOIN sys.availability_groups AS ag
+    ON ar.group_id = ag.group_id
+WHERE ar.replica_server_name = 'TESTSERVER' -- only local --Change Primary Server name here
+  AND r.synchronization_state_desc IS NOT NULL  -- only AG databases
+  AND r.is_primary_replica = 0;  -- only secondary role
+ 
+PRINT @sql; -- review before executing
