@@ -38,7 +38,7 @@ BEGIN
     BEGIN
         CREATE TABLE dbadb.dbo.S3UploadLog
         (
-            LogLine NVARCHAR(4000)
+            LogLine NVARCHAR(max)
         );
     END
 
@@ -51,7 +51,7 @@ BEGIN
     FROM ''' + @LogFilePath + '''
     WITH
     (
-        ROWTERMINATOR = ''\n''
+        ROWTERMINATOR = ''0x0a''
     );';
 
     EXEC(@SQL);
@@ -155,7 +155,7 @@ BackupInfo AS
         FROM msdb.dbo.backupset bs
         INNER JOIN msdb.dbo.backupmediafamily bmf
             ON bs.media_set_id = bmf.media_set_id
-        WHERE bs.type = 'D'
+        WHERE bs.type = 'D' and bmf.physical_device_name like '%backup%'
     ) t
     WHERE rn = 1
 )
@@ -229,12 +229,7 @@ BackupInfo AS
                 WHEN 2 THEN 'RETRY'
                 WHEN 3 THEN 'CANCELLED'
                 WHEN 4 THEN 'IN PROGRESS'
-            END,
-
-        @TotalJobDuration =
-            RIGHT('00'+CAST(run_duration/10000 AS VARCHAR),2)+':'+
-            RIGHT('00'+CAST((run_duration%10000)/100 AS VARCHAR),2)+':'+
-            RIGHT('00'+CAST(run_duration%100 AS VARCHAR),2)
+            END
     FROM JobHistory;
 
     -- Backup Step Duration
@@ -272,6 +267,32 @@ BackupInfo AS
       AND s.step_name = @upload_step_name
       AND h.instance_id < @LastInstanceID
     ORDER BY h.instance_id DESC;
+    ------------------------------------------------------------
+    -- Total Job Duration
+    ------------------------------------------------------------
+
+    DECLARE @BackupSeconds INT,
+    @UploadSeconds INT,
+    @TotalSeconds INT;
+    
+    SET @BackupSeconds =
+          CAST(LEFT(@BackupStepDuration,2) AS INT) * 3600
+        + CAST(SUBSTRING(@BackupStepDuration,4,2) AS INT) * 60
+        + CAST(RIGHT(@BackupStepDuration,2) AS INT);
+    
+    SET @UploadSeconds =
+          CAST(LEFT(@UploadStepDuration,2) AS INT) * 3600
+        + CAST(SUBSTRING(@UploadStepDuration,4,2) AS INT) * 60
+        + CAST(RIGHT(@UploadStepDuration,2) AS INT);
+    
+    SET @TotalSeconds = @BackupSeconds + @UploadSeconds;
+    
+    SET @TotalJobDuration =
+      RIGHT('00' + CAST(@TotalSeconds / 3600 AS VARCHAR(10)),2)
+    + ':'
+    + RIGHT('00' + CAST((@TotalSeconds % 3600) / 60 AS VARCHAR(2)),2)
+    + ':'
+    + RIGHT('00' + CAST(@TotalSeconds % 60 AS VARCHAR(2)),2);
 
     ------------------------------------------------------------
     -- HTML
