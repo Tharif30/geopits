@@ -1,41 +1,9 @@
-/*
-================================================================================
-Procedure: dbo.EstimateNonclusteredIndexSize
-
-Purpose:
-    Estimate the size of a proposed nonclustered index before creating it.
-
-Method:
-    Based on Microsoft's documented method for estimating the size of a
-    nonclustered index.
-
-    Microsoft Learn:
-    https://learn.microsoft.com/en-us/sql/relational-databases/databases/
-    estimate-the-size-of-a-nonclustered-index
-
-Parameters:
-    @SchemaName
-    @TableName
-    @KeyColumns
-    @IncludeColumns
-    @IsUnique
-    @FillFactor
-
-Example:
-
-    EXEC dbo.EstimateNonclusteredIndexSize
-        @SchemaName = 'dbo',
-        @TableName = 'UPI_TLF_DATA',
-        @KeyColumns =
-            'UTD_PTR_SER_NUMBER,UTD_RET_REF_NUMBER',
-        @IncludeColumns =
-            'UTD_BANK_CODE,UTD_NETWORK,UTD_ADDITINAL_REFERENCE';
-
-================================================================================
-*/
+USE DBADB;
+GO
 
 CREATE OR ALTER PROCEDURE dbo.EstimateNonclusteredIndexSize
 (
+    @DatabaseName     SYSNAME,
     @SchemaName       SYSNAME,
     @TableName        SYSNAME,
     @KeyColumns       NVARCHAR(MAX),
@@ -48,9 +16,22 @@ BEGIN
 
     SET NOCOUNT ON;
 
-    /*========================================================================
+    /*======================================================================
       1. Validate parameters
-    =========================================================================*/
+    ======================================================================*/
+
+    IF DB_ID(@DatabaseName) IS NULL
+    BEGIN
+        RAISERROR
+        (
+            'Database does not exist or is not accessible: %s',
+            16,
+            1,
+            @DatabaseName
+        );
+        RETURN;
+    END;
+
 
     IF @FillFactor < 1 OR @FillFactor > 100
     BEGIN
@@ -64,71 +45,102 @@ BEGIN
     END;
 
 
-    DECLARE @ObjectID INT;
+    /*======================================================================
+      2. Variables
+    ======================================================================*/
 
-    SELECT
-        @ObjectID = OBJECT_ID
-        (
-            QUOTENAME(@SchemaName)
-            + '.'
-            + QUOTENAME(@TableName)
-        );
+    DECLARE
+        @SQL NVARCHAR(MAX),
+        @ObjectID INT,
+        @DatabaseID INT;
+
+
+    SET @DatabaseID = DB_ID(@DatabaseName);
+
+
+    /*======================================================================
+      3. Get target table Object_ID
+    ======================================================================*/
+
+    SET @SQL = N'
+        SELECT
+            @ObjectID_OUT = OBJECT_ID
+            (
+                QUOTENAME(@SchemaName_IN)
+                + ''.''
+                + QUOTENAME(@TableName_IN)
+            )
+        FROM ' + QUOTENAME(@DatabaseName) + N'.sys.objects
+        WHERE type = ''U''
+          AND name = @TableName_IN;
+    ';
+
+
+    EXEC sys.sp_executesql
+        @SQL,
+        N'@SchemaName_IN SYSNAME,
+          @TableName_IN SYSNAME,
+          @ObjectID_OUT INT OUTPUT',
+        @SchemaName_IN = @SchemaName,
+        @TableName_IN = @TableName,
+        @ObjectID_OUT = @ObjectID OUTPUT;
 
 
     IF @ObjectID IS NULL
     BEGIN
         RAISERROR
         (
-            'Table does not exist.',
+            'Table does not exist: %s.%s.%s',
             16,
-            1
+            1,
+            @DatabaseName,
+            @SchemaName,
+            @TableName
         );
         RETURN;
     END;
 
 
-    /*========================================================================
-      2. Get table row count
-    =========================================================================*/
+    /*======================================================================
+      4. Temporary tables
+    ======================================================================*/
 
-    DECLARE @NumRows BIGINT;
-
-    SELECT
-        @NumRows = SUM(p.rows)
-    FROM sys.partitions AS p
-    WHERE p.object_id = @ObjectID
-      AND p.index_id IN (0,1);
-
-
-    IF @NumRows IS NULL
-    BEGIN
-        RAISERROR
-        (
-            'Unable to determine table row count.',
-            16,
-            1
-        );
-        RETURN;
-    END;
-
-
-    /*========================================================================
-      3. Store KEY columns
-    =========================================================================*/
-
-    DECLARE @Key TABLE
+    CREATE TABLE #Key
     (
         Ordinal     INT IDENTITY(1,1),
         ColumnName  SYSNAME
     );
 
 
-    /*
-        XML splitter instead of STRING_SPLIT.
-        This works on older SQL Server compatibility levels.
-    */
+    CREATE TABLE #Include
+    (
+        Ordinal     INT IDENTITY(1,1),
+        ColumnName  SYSNAME
+    );
 
-    INSERT INTO @Key
+
+    CREATE TABLE #Columns
+    (
+        ColumnName      SYSNAME,
+        SourceType      VARCHAR(20),
+        IsKey           BIT,
+        IsInclude       BIT,
+        IsLocator       BIT,
+        IsNullable      BIT,
+        IsVariable      BIT,
+        MaxBytes        BIGINT,
+        FixedBytes      BIGINT
+    );
+
+
+    /*======================================================================
+      5. Parse KEY columns
+
+         XML is used instead of STRING_SPLIT so this works with
+         older SQL Server compatibility levels.
+    ======================================================================*/
+
+    INSERT INTO #Key
     (
         ColumnName
     )
@@ -149,21 +161,14 @@ BEGIN
         X.XMLData.nodes('/x') AS T(C);
 
 
-    /*========================================================================
-      4. Store INCLUDE columns
-    =========================================================================*/
-
-    DECLARE @Include TABLE
-    (
-        Ordinal     INT IDENTITY(1,1),
-        ColumnName  SYSNAME
-    );
-
+    /*======================================================================
+      6. Parse INCLUDE columns
+    ======================================================================*/
 
     IF NULLIF(LTRIM(RTRIM(@IncludeColumns)), '') IS NOT NULL
     BEGIN
 
-        INSERT INTO @Include
+        INSERT INTO #Include
         (
             ColumnName
         )
@@ -186,308 +191,174 @@ BEGIN
     END;
 
 
-    /*========================================================================
-      5. Validate requested columns
-    =========================================================================*/
+    /*======================================================================
+      7. Validate requested columns
+    ======================================================================*/
 
-    IF EXISTS
-    (
-        SELECT 1
-        FROM @Key K
-        WHERE NOT EXISTS
+    SET @SQL = N'
+
+        IF EXISTS
         (
             SELECT 1
-            FROM sys.columns C
-            WHERE C.object_id = @ObjectID
-              AND C.name = K.ColumnName
+            FROM #Key K
+            WHERE NOT EXISTS
+            (
+                SELECT 1
+                FROM ' + QUOTENAME(@DatabaseName) + N'.sys.columns C
+                WHERE C.object_id = @ObjectID
+                  AND C.name = K.ColumnName
+            )
         )
-    )
-    BEGIN
+        BEGIN
+
+            SELECT
+                K.ColumnName AS InvalidKeyColumn
+            FROM #Key K
+            WHERE NOT EXISTS
+            (
+                SELECT 1
+                FROM ' + QUOTENAME(@DatabaseName) + N'.sys.columns C
+                WHERE C.object_id = @ObjectID
+                  AND C.name = K.ColumnName
+            );
+
+            RAISERROR
+            (
+                ''One or more key columns do not exist.'',
+                16,
+                1
+            );
+
+            RETURN;
+
+        END;
+
+
+        IF EXISTS
+        (
+            SELECT 1
+            FROM #Include I
+            WHERE NOT EXISTS
+            (
+                SELECT 1
+                FROM ' + QUOTENAME(@DatabaseName) + N'.sys.columns C
+                WHERE C.object_id = @ObjectID
+                  AND C.name = I.ColumnName
+            )
+        )
+        BEGIN
+
+            SELECT
+                I.ColumnName AS InvalidIncludeColumn
+            FROM #Include I
+            WHERE NOT EXISTS
+            (
+                SELECT 1
+                FROM ' + QUOTENAME(@DatabaseName) + N'.sys.columns C
+                WHERE C.object_id = @ObjectID
+                  AND C.name = I.ColumnName
+            );
+
+            RAISERROR
+            (
+                ''One or more INCLUDE columns do not exist.'',
+                16,
+                1
+            );
+
+            RETURN;
+
+        END;
+
+    ';
+
+
+    EXEC sys.sp_executesql
+        @SQL,
+        N'@ObjectID INT',
+        @ObjectID = @ObjectID;
+
+
+    /*======================================================================
+      8. Get table row count
+    ======================================================================*/
+
+    DECLARE @NumRows BIGINT;
+
+
+    SET @SQL = N'
 
         SELECT
-            K.ColumnName AS InvalidKeyColumn
-        FROM @Key K
-        WHERE NOT EXISTS
-        (
-            SELECT 1
-            FROM sys.columns C
-            WHERE C.object_id = @ObjectID
-              AND C.name = K.ColumnName
-        );
+            @NumRows_OUT = SUM(P.rows)
 
+        FROM ' + QUOTENAME(@DatabaseName) + N'.sys.partitions P
+
+        WHERE P.object_id = @ObjectID
+          AND P.index_id IN (0,1);
+
+    ';
+
+
+    EXEC sys.sp_executesql
+        @SQL,
+        N'@ObjectID INT,
+          @NumRows_OUT BIGINT OUTPUT',
+        @ObjectID = @ObjectID,
+        @NumRows_OUT = @NumRows OUTPUT;
+
+
+    IF @NumRows IS NULL
+    BEGIN
         RAISERROR
         (
-            'One or more key columns do not exist.',
+            'Unable to determine table row count.',
             16,
             1
         );
-
         RETURN;
-
     END;
 
 
-    IF EXISTS
-    (
-        SELECT 1
-        FROM @Include I
-        WHERE NOT EXISTS
-        (
-            SELECT 1
-            FROM sys.columns C
-            WHERE C.object_id = @ObjectID
-              AND C.name = I.ColumnName
-        )
-    )
-    BEGIN
+    /*======================================================================
+      9. Find clustered index
+    ======================================================================*/
+
+    DECLARE
+        @ClusteredIndexID INT,
+        @ClusteredIndexIsUnique BIT = 0;
+
+
+    SET @SQL = N'
 
         SELECT
-            I.ColumnName AS InvalidIncludeColumn
-        FROM @Include I
-        WHERE NOT EXISTS
-        (
-            SELECT 1
-            FROM sys.columns C
-            WHERE C.object_id = @ObjectID
-              AND C.name = I.ColumnName
-        );
+            @ClusteredIndexID_OUT = I.index_id,
+            @ClusteredIndexIsUnique_OUT = I.is_unique
 
-        RAISERROR
-        (
-            'One or more INCLUDE columns do not exist.',
-            16,
-            1
-        );
+        FROM ' + QUOTENAME(@DatabaseName) + N'.sys.indexes I
 
-        RETURN;
-
-    END;
-
-
-    /*========================================================================
-      6. Find clustered index
-    =========================================================================*/
-
-    DECLARE @ClusteredIndexID INT;
-
-    SELECT
-        @ClusteredIndexID = I.index_id
-    FROM sys.indexes AS I
-    WHERE I.object_id = @ObjectID
-      AND I.type = 1;
-
-
-    DECLARE @ClusteredIndexIsUnique BIT = 0;
-
-
-    IF @ClusteredIndexID IS NOT NULL
-    BEGIN
-
-        SELECT
-            @ClusteredIndexIsUnique = I.is_unique
-        FROM sys.indexes AS I
         WHERE I.object_id = @ObjectID
-          AND I.index_id = @ClusteredIndexID;
+          AND I.type = 1;
 
-    END;
-
-
-    /*========================================================================
-      7. Store all columns participating in the proposed index
-    =========================================================================*/
-
-    DECLARE @Columns TABLE
-    (
-        ColumnName      SYSNAME,
-        SourceType      VARCHAR(20),
-        IsKey           BIT,
-        IsInclude       BIT,
-        IsLocator       BIT,
-        IsNullable      BIT,
-        IsVariable      BIT,
-        MaxBytes        BIGINT,
-        FixedBytes      BIGINT
-    );
+    ';
 
 
-    /*========================================================================
-      8. Add requested KEY columns
-    =========================================================================*/
-
-    INSERT INTO @Columns
-    (
-        ColumnName,
-        SourceType,
-        IsKey,
-        IsInclude,
-        IsLocator,
-        IsNullable,
-        IsVariable,
-        MaxBytes,
-        FixedBytes
-    )
-    SELECT
-        C.name,
-        'INDEX_KEY',
-        1,
-        0,
-        0,
-        C.is_nullable,
-
-        CASE
-            WHEN TY.name IN
-            (
-                'varchar',
-                'nvarchar',
-                'varbinary',
-                'sql_variant'
-            )
-            THEN 1
-            ELSE 0
-        END,
-
-        CASE
-            WHEN TY.name = 'nvarchar'
-            THEN
-                CASE
-                    WHEN C.max_length = -1
-                    THEN 0
-                    ELSE C.max_length
-                END
-
-            WHEN TY.name IN
-            (
-                'varchar',
-                'varbinary'
-            )
-            THEN
-                CASE
-                    WHEN C.max_length = -1
-                    THEN 0
-                    ELSE C.max_length
-                END
-
-            WHEN TY.name = 'sql_variant'
-            THEN 8016
-
-            ELSE C.max_length
-        END,
-
-        CASE
-            WHEN TY.name IN
-            (
-                'varchar',
-                'nvarchar',
-                'varbinary',
-                'sql_variant'
-            )
-            THEN 0
-            ELSE C.max_length
-        END
-
-    FROM @Key K
-
-    INNER JOIN sys.columns C
-        ON C.object_id = @ObjectID
-       AND C.name = K.ColumnName
-
-    INNER JOIN sys.types TY
-        ON TY.user_type_id = C.user_type_id;
+    EXEC sys.sp_executesql
+        @SQL,
+        N'@ObjectID INT,
+          @ClusteredIndexID_OUT INT OUTPUT,
+          @ClusteredIndexIsUnique_OUT BIT OUTPUT',
+        @ObjectID = @ObjectID,
+        @ClusteredIndexID_OUT = @ClusteredIndexID OUTPUT,
+        @ClusteredIndexIsUnique_OUT = @ClusteredIndexIsUnique OUTPUT;
 
 
-    /*========================================================================
-      9. Add INCLUDE columns
-    =========================================================================*/
+    /*======================================================================
+      10. Add proposed KEY columns
+    ======================================================================*/
 
-    INSERT INTO @Columns
-    (
-        ColumnName,
-        SourceType,
-        IsKey,
-        IsInclude,
-        IsLocator,
-        IsNullable,
-        IsVariable,
-        MaxBytes,
-        FixedBytes
-    )
-    SELECT
-        C.name,
-        'INCLUDE',
-        0,
-        1,
-        0,
-        C.is_nullable,
+    SET @SQL = N'
 
-        CASE
-            WHEN TY.name IN
-            (
-                'varchar',
-                'nvarchar',
-                'varbinary',
-                'sql_variant'
-            )
-            THEN 1
-            ELSE 0
-        END,
-
-        CASE
-            WHEN TY.name = 'nvarchar'
-            THEN
-                CASE
-                    WHEN C.max_length = -1
-                    THEN 0
-                    ELSE C.max_length
-                END
-
-            WHEN TY.name IN
-            (
-                'varchar',
-                'varbinary'
-            )
-            THEN
-                CASE
-                    WHEN C.max_length = -1
-                    THEN 0
-                    ELSE C.max_length
-                END
-
-            WHEN TY.name = 'sql_variant'
-            THEN 8016
-
-            ELSE C.max_length
-        END,
-
-        CASE
-            WHEN TY.name IN
-            (
-                'varchar',
-                'nvarchar',
-                'varbinary',
-                'sql_variant'
-            )
-            THEN 0
-            ELSE C.max_length
-        END
-
-    FROM @Include INC
-
-    INNER JOIN sys.columns C
-        ON C.object_id = @ObjectID
-       AND C.name = INC.ColumnName
-
-    INNER JOIN sys.types TY
-        ON TY.user_type_id = C.user_type_id;
-
-
-    /*========================================================================
-      10. Add clustered key as NCI row locator
-    =========================================================================*/
-
-    IF @ClusteredIndexID IS NOT NULL
-    BEGIN
-
-        INSERT INTO @Columns
+        INSERT INTO #Columns
         (
             ColumnName,
             SourceType,
@@ -499,28 +370,29 @@ BEGIN
             MaxBytes,
             FixedBytes
         )
+
         SELECT
             C.name,
-            'CLUSTERED_KEY',
+            ''INDEX_KEY'',
             1,
             0,
-            1,
+            0,
             C.is_nullable,
 
             CASE
                 WHEN TY.name IN
                 (
-                    'varchar',
-                    'nvarchar',
-                    'varbinary',
-                    'sql_variant'
+                    ''varchar'',
+                    ''nvarchar'',
+                    ''varbinary'',
+                    ''sql_variant''
                 )
                 THEN 1
                 ELSE 0
             END,
 
             CASE
-                WHEN TY.name = 'nvarchar'
+                WHEN TY.name = ''nvarchar''
                 THEN
                     CASE
                         WHEN C.max_length = -1
@@ -530,8 +402,8 @@ BEGIN
 
                 WHEN TY.name IN
                 (
-                    'varchar',
-                    'varbinary'
+                    ''varchar'',
+                    ''varbinary''
                 )
                 THEN
                     CASE
@@ -540,7 +412,7 @@ BEGIN
                         ELSE C.max_length
                     END
 
-                WHEN TY.name = 'sql_variant'
+                WHEN TY.name = ''sql_variant''
                 THEN 8016
 
                 ELSE C.max_length
@@ -549,51 +421,256 @@ BEGIN
             CASE
                 WHEN TY.name IN
                 (
-                    'varchar',
-                    'nvarchar',
-                    'varbinary',
-                    'sql_variant'
+                    ''varchar'',
+                    ''nvarchar'',
+                    ''varbinary'',
+                    ''sql_variant''
                 )
                 THEN 0
                 ELSE C.max_length
             END
 
-        FROM sys.index_columns IC
+        FROM #Key K
 
-        INNER JOIN sys.columns C
-            ON C.object_id = IC.object_id
-           AND C.column_id = IC.column_id
+        INNER JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.columns C
+            ON C.object_id = @ObjectID
+           AND C.name = K.ColumnName
 
-        INNER JOIN sys.types TY
-            ON TY.user_type_id = C.user_type_id
+        INNER JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.types TY
+            ON TY.user_type_id = C.user_type_id;
 
-        WHERE IC.object_id = @ObjectID
-          AND IC.index_id = @ClusteredIndexID
-          AND IC.key_ordinal > 0
+    ';
 
-          AND NOT EXISTS
-          (
-              SELECT 1
-              FROM @Key K
-              WHERE K.ColumnName = C.name
-          );
+
+    EXEC sys.sp_executesql
+        @SQL,
+        N'@ObjectID INT',
+        @ObjectID = @ObjectID;
+
+
+    /*======================================================================
+      11. Add proposed INCLUDE columns
+    ======================================================================*/
+
+    SET @SQL = N'
+
+        INSERT INTO #Columns
+        (
+            ColumnName,
+            SourceType,
+            IsKey,
+            IsInclude,
+            IsLocator,
+            IsNullable,
+            IsVariable,
+            MaxBytes,
+            FixedBytes
+        )
+
+        SELECT
+            C.name,
+            ''INCLUDE'',
+            0,
+            1,
+            0,
+            C.is_nullable,
+
+            CASE
+                WHEN TY.name IN
+                (
+                    ''varchar'',
+                    ''nvarchar'',
+                    ''varbinary'',
+                    ''sql_variant''
+                )
+                THEN 1
+                ELSE 0
+            END,
+
+            CASE
+                WHEN TY.name = ''nvarchar''
+                THEN
+                    CASE
+                        WHEN C.max_length = -1
+                        THEN 0
+                        ELSE C.max_length
+                    END
+
+                WHEN TY.name IN
+                (
+                    ''varchar'',
+                    ''varbinary''
+                )
+                THEN
+                    CASE
+                        WHEN C.max_length = -1
+                        THEN 0
+                        ELSE C.max_length
+                    END
+
+                WHEN TY.name = ''sql_variant''
+                THEN 8016
+
+                ELSE C.max_length
+            END,
+
+            CASE
+                WHEN TY.name IN
+                (
+                    ''varchar'',
+                    ''nvarchar'',
+                    ''varbinary'',
+                    ''sql_variant''
+                )
+                THEN 0
+                ELSE C.max_length
+            END
+
+        FROM #Include INC
+
+        INNER JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.columns C
+            ON C.object_id = @ObjectID
+           AND C.name = INC.ColumnName
+
+        INNER JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.types TY
+            ON TY.user_type_id = C.user_type_id;
+
+    ';
+
+
+    EXEC sys.sp_executesql
+        @SQL,
+        N'@ObjectID INT',
+        @ObjectID = @ObjectID;
+
+
+    /*======================================================================
+      12. Add clustered key columns as row locator
+    ======================================================================*/
+
+    IF @ClusteredIndexID IS NOT NULL
+    BEGIN
+
+        SET @SQL = N'
+
+            INSERT INTO #Columns
+            (
+                ColumnName,
+                SourceType,
+                IsKey,
+                IsInclude,
+                IsLocator,
+                IsNullable,
+                IsVariable,
+                MaxBytes,
+                FixedBytes
+            )
+
+            SELECT
+                C.name,
+                ''CLUSTERED_KEY'',
+                1,
+                0,
+                1,
+                C.is_nullable,
+
+                CASE
+                    WHEN TY.name IN
+                    (
+                        ''varchar'',
+                        ''nvarchar'',
+                        ''varbinary'',
+                        ''sql_variant''
+                    )
+                    THEN 1
+                    ELSE 0
+                END,
+
+                CASE
+                    WHEN TY.name = ''nvarchar''
+                    THEN
+                        CASE
+                            WHEN C.max_length = -1
+                            THEN 0
+                            ELSE C.max_length
+                        END
+
+                    WHEN TY.name IN
+                    (
+                        ''varchar'',
+                        ''varbinary''
+                    )
+                    THEN
+                        CASE
+                            WHEN C.max_length = -1
+                            THEN 0
+                            ELSE C.max_length
+                        END
+
+                    WHEN TY.name = ''sql_variant''
+                    THEN 8016
+
+                    ELSE C.max_length
+                END,
+
+                CASE
+                    WHEN TY.name IN
+                    (
+                        ''varchar'',
+                        ''nvarchar'',
+                        ''varbinary'',
+                        ''sql_variant''
+                    )
+                    THEN 0
+                    ELSE C.max_length
+                END
+
+            FROM ' + QUOTENAME(@DatabaseName) + N'.sys.index_columns IC
+
+            INNER JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.columns C
+                ON C.object_id = IC.object_id
+               AND C.column_id = IC.column_id
+
+            INNER JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.types TY
+                ON TY.user_type_id = C.user_type_id
+
+            WHERE IC.object_id = @ObjectID
+              AND IC.index_id = @ClusteredIndexID
+              AND IC.key_ordinal > 0
+
+              AND NOT EXISTS
+              (
+                  SELECT 1
+                  FROM #Key K
+                  WHERE K.ColumnName = C.name
+              );
+
+        ';
+
+
+        EXEC sys.sp_executesql
+            @SQL,
+            N'@ObjectID INT,
+              @ClusteredIndexID INT',
+            @ObjectID = @ObjectID,
+            @ClusteredIndexID = @ClusteredIndexID;
 
     END;
 
 
-    /*========================================================================
-      11. Calculate NON-LEAF index row characteristics
-    =========================================================================*/
+    /*======================================================================
+      13. Calculate NON-LEAF row characteristics
+    ======================================================================*/
 
     DECLARE
-        @NumKeyCols              INT,
-        @NumVariableKeyCols      INT,
-        @FixedKeySize            BIGINT,
-        @MaxVarKeySize           BIGINT,
-        @IndexNullBitmap         INT,
-        @VariableKeySize         BIGINT,
-        @IndexRowSize            BIGINT,
-        @IndexRowsPerPage        INT;
+        @NumKeyCols          INT,
+        @NumVariableKeyCols  INT,
+        @FixedKeySize        BIGINT,
+        @MaxVarKeySize       BIGINT,
+        @IndexNullBitmap     INT,
+        @VariableKeySize     BIGINT,
+        @IndexRowSize        BIGINT,
+        @IndexRowsPerPage    INT;
 
 
     SELECT
@@ -601,36 +678,48 @@ BEGIN
             COUNT(*),
 
         @NumVariableKeyCols =
-            SUM
+            ISNULL
             (
-                CASE
-                    WHEN IsVariable = 1
-                    THEN 1
-                    ELSE 0
-                END
+                SUM
+                (
+                    CASE
+                        WHEN IsVariable = 1
+                        THEN 1
+                        ELSE 0
+                    END
+                ),
+                0
             ),
 
         @FixedKeySize =
-            SUM
+            ISNULL
             (
-                CASE
-                    WHEN IsVariable = 0
-                    THEN FixedBytes
-                    ELSE 0
-                END
+                SUM
+                (
+                    CASE
+                        WHEN IsVariable = 0
+                        THEN FixedBytes
+                        ELSE 0
+                    END
+                ),
+                0
             ),
 
         @MaxVarKeySize =
-            SUM
+            ISNULL
             (
-                CASE
-                    WHEN IsVariable = 1
-                    THEN MaxBytes
-                    ELSE 0
-                END
+                SUM
+                (
+                    CASE
+                        WHEN IsVariable = 1
+                        THEN MaxBytes
+                        ELSE 0
+                    END
+                ),
+                0
             )
 
-    FROM @Columns
+    FROM #Columns
 
     WHERE IsKey = 1;
 
@@ -653,7 +742,7 @@ BEGIN
     END;
 
 
-    /* Uniqueifier for nonunique clustered index */
+    /* Nonunique clustered key uniqueifier */
 
     IF @ClusteredIndexID IS NOT NULL
        AND @ClusteredIndexIsUnique = 0
@@ -676,7 +765,7 @@ BEGIN
     IF EXISTS
     (
         SELECT 1
-        FROM @Columns
+        FROM #Columns
         WHERE IsKey = 1
           AND IsNullable = 1
     )
@@ -694,7 +783,7 @@ BEGIN
     END;
 
 
-    /* Variable-length column overhead */
+    /* Variable-length columns */
 
     IF @NumVariableKeyCols > 0
     BEGIN
@@ -713,9 +802,7 @@ BEGIN
     END;
 
 
-    /*
-        Non-leaf index row size
-    */
+    /* Non-leaf row size */
 
     SET @IndexRowSize =
           @FixedKeySize
@@ -725,9 +812,7 @@ BEGIN
         + 6;
 
 
-    /*
-        Rows per non-leaf page
-    */
+    /* Rows per non-leaf page */
 
     SET @IndexRowsPerPage =
         FLOOR
@@ -741,21 +826,21 @@ BEGIN
         );
 
 
-    /*========================================================================
-      12. Calculate LEAF-level characteristics
-    =========================================================================*/
+    /*======================================================================
+      14. Calculate LEAF-level characteristics
+    ======================================================================*/
 
     DECLARE
-        @NumLeafCols              INT,
-        @NumVariableLeafCols      INT,
-        @FixedLeafSize            BIGINT,
-        @MaxVarLeafSize           BIGINT,
-        @LeafNullBitmap           INT,
-        @VariableLeafSize         BIGINT,
-        @LeafRowSize              BIGINT,
-        @LeafRowsPerPage          INT,
-        @FreeRowsPerPage          INT,
-        @NumLeafPages             BIGINT;
+        @NumLeafCols          INT,
+        @NumVariableLeafCols  INT,
+        @FixedLeafSize        BIGINT,
+        @MaxVarLeafSize       BIGINT,
+        @LeafNullBitmap       INT,
+        @VariableLeafSize     BIGINT,
+        @LeafRowSize          BIGINT,
+        @LeafRowsPerPage      INT,
+        @FreeRowsPerPage      INT,
+        @NumLeafPages         BIGINT;
 
 
     SELECT
@@ -763,42 +848,51 @@ BEGIN
             COUNT(*),
 
         @NumVariableLeafCols =
-            SUM
+            ISNULL
             (
-                CASE
-                    WHEN IsVariable = 1
-                    THEN 1
-                    ELSE 0
-                END
+                SUM
+                (
+                    CASE
+                        WHEN IsVariable = 1
+                        THEN 1
+                        ELSE 0
+                    END
+                ),
+                0
             ),
 
         @FixedLeafSize =
-            SUM
+            ISNULL
             (
-                CASE
-                    WHEN IsVariable = 0
-                    THEN FixedBytes
-                    ELSE 0
-                END
+                SUM
+                (
+                    CASE
+                        WHEN IsVariable = 0
+                        THEN FixedBytes
+                        ELSE 0
+                    END
+                ),
+                0
             ),
 
         @MaxVarLeafSize =
-            SUM
+            ISNULL
             (
-                CASE
-                    WHEN IsVariable = 1
-                    THEN MaxBytes
-                    ELSE 0
-                END
+                SUM
+                (
+                    CASE
+                        WHEN IsVariable = 1
+                        THEN MaxBytes
+                        ELSE 0
+                    END
+                ),
+                0
             )
 
-    FROM @Columns;
+    FROM #Columns;
 
 
-    /*
-        For a UNIQUE NCI, the row locator needs to be included
-        at the leaf level.
-    */
+    /* Unique NCI leaf locator */
 
     IF @IsUnique = 1
     BEGIN
@@ -816,39 +910,30 @@ BEGIN
                 @MaxVarLeafSize + 8;
 
         END
-        ELSE
+        ELSE IF @ClusteredIndexIsUnique = 0
         BEGIN
 
-            IF @ClusteredIndexIsUnique = 0
-            BEGIN
+            SET @NumLeafCols =
+                @NumLeafCols + 1;
 
-                SET @NumLeafCols =
-                    @NumLeafCols + 1;
+            SET @NumVariableLeafCols =
+                @NumVariableLeafCols + 1;
 
-                SET @NumVariableLeafCols =
-                    @NumVariableLeafCols + 1;
-
-                SET @MaxVarLeafSize =
-                    @MaxVarLeafSize + 4;
-
-            END;
+            SET @MaxVarLeafSize =
+                @MaxVarLeafSize + 4;
 
         END;
 
     END;
 
 
-    /*========================================================================
-      13. Leaf NULL bitmap
-    =========================================================================*/
+    /* Leaf NULL bitmap */
 
     SET @LeafNullBitmap =
         2 + ((@NumLeafCols + 7) / 8);
 
 
-    /*========================================================================
-      14. Variable-length leaf columns
-    =========================================================================*/
+    /* Variable leaf columns */
 
     IF @NumVariableLeafCols > 0
     BEGIN
@@ -867,9 +952,7 @@ BEGIN
     END;
 
 
-    /*========================================================================
-      15. Leaf row size
-    =========================================================================*/
+    /* Leaf row size */
 
     SET @LeafRowSize =
           @FixedLeafSize
@@ -878,9 +961,7 @@ BEGIN
         + 1;
 
 
-    /*========================================================================
-      16. Leaf rows per page
-    =========================================================================*/
+    /* Rows per leaf page */
 
     SET @LeafRowsPerPage =
         FLOOR
@@ -894,9 +975,9 @@ BEGIN
         );
 
 
-    /*========================================================================
-      17. Fill factor
-    =========================================================================*/
+    /*======================================================================
+      15. Fill factor
+    ======================================================================*/
 
     SET @FreeRowsPerPage =
         FLOOR
@@ -915,9 +996,9 @@ BEGIN
         );
 
 
-    /*========================================================================
-      18. Estimated leaf pages
-    =========================================================================*/
+    /*======================================================================
+      16. Estimate leaf pages
+    ======================================================================*/
 
     SET @NumLeafPages =
         CEILING
@@ -932,9 +1013,9 @@ BEGIN
         );
 
 
-    /*========================================================================
-      19. Estimate NON-LEAF pages
-    =========================================================================*/
+    /*======================================================================
+      17. Estimate non-leaf pages
+    ======================================================================*/
 
     DECLARE
         @NumIndexPages BIGINT = 0,
@@ -985,9 +1066,9 @@ BEGIN
         @NumIndexPages + 1;
 
 
-    /*========================================================================
-      20. Total estimated pages and size
-    =========================================================================*/
+    /*======================================================================
+      18. Final size
+    ======================================================================*/
 
     DECLARE
         @TotalPages BIGINT,
@@ -1013,57 +1094,61 @@ BEGIN
         @TotalBytes / 1024.0 / 1024.0 / 1024.0;
 
 
-    /*========================================================================
-      21. Display proposed index column information
-    =========================================================================*/
+    /*======================================================================
+      19. Show column calculation details
+    ======================================================================*/
 
-    SELECT
-        C.ColumnName,
-        C.SourceType,
-        C.IsKey,
-        C.IsInclude,
-        C.IsLocator,
-        TY.name AS DataType,
-        C.isnullable AS IsNullable,
-        C.MaxBytes,
-        C.FixedBytes
+    SET @SQL = N'
 
-    FROM
-    (
         SELECT
-            ColumnName,
-            SourceType,
-            IsKey,
-            IsInclude,
-            IsLocator,
-            IsNullable,
-            MaxBytes,
-            FixedBytes
-        FROM @Columns
-    ) C
+            C.ColumnName,
+            C.SourceType,
+            C.IsKey,
+            C.IsInclude,
+            C.IsLocator,
+            TY.name AS DataType,
+            C.IsNullable,
+            C.MaxBytes,
+            C.FixedBytes
 
-    LEFT JOIN sys.columns SC
-        ON SC.object_id = @ObjectID
-       AND SC.name = C.ColumnName
+        FROM #Columns C
 
-    LEFT JOIN sys.types TY
-        ON TY.user_type_id = SC.user_type_id
+        LEFT JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.columns SC
+            ON SC.object_id = @ObjectID
+           AND SC.name = C.ColumnName
 
-    ORDER BY
-        CASE
-            WHEN C.SourceType = 'INDEX_KEY'
-            THEN 1
-            WHEN C.SourceType = 'CLUSTERED_KEY'
-            THEN 2
-            ELSE 3
-        END;
+        LEFT JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.types TY
+            ON TY.user_type_id = SC.user_type_id
+
+        ORDER BY
+            CASE
+                WHEN C.SourceType = ''INDEX_KEY''
+                THEN 1
+
+                WHEN C.SourceType = ''CLUSTERED_KEY''
+                THEN 2
+
+                ELSE 3
+            END,
+
+            C.ColumnName;
+
+    ';
 
 
-    /*========================================================================
-      22. FINAL ESTIMATE
-    =========================================================================*/
+    EXEC sys.sp_executesql
+        @SQL,
+        N'@ObjectID INT',
+        @ObjectID = @ObjectID;
+
+
+    /*======================================================================
+      20. Final result
+    ======================================================================*/
 
     SELECT
+
+        @DatabaseName AS [DatabaseName],
 
         @SchemaName AS [SchemaName],
 
@@ -1083,7 +1168,12 @@ BEGIN
 
         @FillFactor AS [FillFactor],
 
-        /* Row sizes */
+        @ClusteredIndexID AS [ClusteredIndexID],
+
+        @ClusteredIndexIsUnique AS
+            [ClusteredIndexIsUnique],
+
+        /* Row size */
 
         @IndexRowSize AS
             [NonLeafRowSize_Bytes],
@@ -1098,6 +1188,11 @@ BEGIN
 
         @LeafRowsPerPage AS
             [LeafRowsPerPage],
+
+        /* Levels */
+
+        @NonLeafLevels AS
+            [EstimatedNonLeafLevels],
 
         /* Pages */
 
