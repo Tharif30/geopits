@@ -62,43 +62,41 @@ BEGIN
       3. Get target table Object_ID
     ======================================================================*/
 
-    SET @SQL = N'
-        SELECT
-            @ObjectID_OUT = OBJECT_ID
-            (
-                QUOTENAME(@SchemaName_IN)
-                + ''.''
-                + QUOTENAME(@TableName_IN)
-            )
-        FROM ' + QUOTENAME(@DatabaseName) + N'.sys.objects
-        WHERE type = ''U''
-          AND name = @TableName_IN;
-    ';
+SET @SQL = N'
+    SELECT
+        @ObjectID_OUT = O.object_id
+    FROM ' + QUOTENAME(@DatabaseName) + N'.sys.objects AS O
+    INNER JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.schemas AS S
+        ON S.schema_id = O.schema_id
+    WHERE O.type = ''U''
+      AND O.name = @TableName_IN
+      AND S.name = @SchemaName_IN;
+';
 
 
-    EXEC sys.sp_executesql
-        @SQL,
-        N'@SchemaName_IN SYSNAME,
-          @TableName_IN SYSNAME,
-          @ObjectID_OUT INT OUTPUT',
-        @SchemaName_IN = @SchemaName,
-        @TableName_IN = @TableName,
-        @ObjectID_OUT = @ObjectID OUTPUT;
+EXEC sys.sp_executesql
+    @SQL,
+    N'@SchemaName_IN SYSNAME,
+      @TableName_IN SYSNAME,
+      @ObjectID_OUT INT OUTPUT',
+    @SchemaName_IN = @SchemaName,
+    @TableName_IN = @TableName,
+    @ObjectID_OUT = @ObjectID OUTPUT;
 
 
-    IF @ObjectID IS NULL
-    BEGIN
-        RAISERROR
-        (
-            'Table does not exist: %s.%s.%s',
-            16,
-            1,
-            @DatabaseName,
-            @SchemaName,
-            @TableName
-        );
-        RETURN;
-    END;
+IF @ObjectID IS NULL
+BEGIN
+    RAISERROR
+    (
+        'Table does not exist: %s.%s.%s',
+        16,
+        1,
+        @DatabaseName,
+        @SchemaName,
+        @TableName
+    );
+    RETURN;
+END;
 
 
     /*======================================================================
