@@ -44,3 +44,19 @@ Store procedure
 --CROSS APPLY sys.dm_exec_query_plan(qs.plan_handle) qp
 --WHERE OBJECT_NAME(qs.object_id, qs.database_id)
 --      = 'Spcreate_ClientDPAccountCodes_For_FundsGenie';
+
+
+
+SELECT
+    q.query_id,
+    q.object_id,
+    OBJECT_SCHEMA_NAME(q.object_id) AS SchemaName,
+    OBJECT_NAME(q.object_id) AS ProcedureName,
+    q.query_parameterization_type_desc,
+    qt.query_sql_text
+FROM sys.query_store_query AS q
+JOIN sys.query_store_query_text AS qt
+    ON q.query_text_id = qt.query_text_id
+WHERE q.object_id = OBJECT_ID
+      ('SPARCIM.dbo.Sparc_SPPullClientsFromSPARCToGateWay')
+ORDER BY q.query_id;
